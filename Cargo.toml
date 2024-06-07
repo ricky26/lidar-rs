@@ -1,0 +1,9 @@
+[package]
+name = "lidar-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytemuck = "1.16.0"
+bevy = { version = "0.14.0-rc.2" }
+#bevy_xpbd_3d = "0.4.2"
