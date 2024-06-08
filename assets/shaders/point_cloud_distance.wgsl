@@ -24,7 +24,7 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
     let dist = length(in.world_position.xyz - view.world_position);
     let frac = smoothstep(material.distance_min, material.distance_max, dist);
     let hue = mix(material.hue_min, material.hue_max, frac);
-    let distance_color = vec4(hsv_to_rgb(vec3(hue, 1.0, 1.0)), 1.0);
+    let distance_color = vec4(hsv_to_rgb(vec3(hue, 1.0, 1.0)), 0.5);
     let color = distance_color * textureSample(base_color_texture, base_color_sampler, in.uv);
     return calculate_fragment_output(in.clip_position.z, color);
 }

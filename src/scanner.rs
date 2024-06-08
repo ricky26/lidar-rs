@@ -25,9 +25,9 @@ pub struct Scanner {
 impl Default for Scanner {
     fn default() -> Self {
         Scanner {
-            size_setting: 0.75,
-            angle_range: vec2(PI * 0.01, PI * 0.1),
-            interval_range: vec2(0.005, 0.003),
+            size_setting: 0.6,
+            angle_range: vec2(PI * 0.02, PI * 0.1),
+            interval_range: vec2(0.0011, 0.001),
             progress: 0.0,
             burst_duration: 3.0,
             active: false,
@@ -99,7 +99,7 @@ pub fn scan(
 
             while scanner.progress > interval {
                 let p = rng.gen_range(0.0..(2.0 * PI));
-                let r = rng.gen_range(0.0..angle);
+                let r = rng.gen_range(0.0..1.0f32).sqrt() * angle;
                 let (sp, cp) = p.sin_cos();
                 let (sr, cr) = r.sin_cos();
                 let local_dir = vec3(sr * cp, sr * sp, -cr);
@@ -120,7 +120,6 @@ pub fn scan(
                     points.push(end.extend(0.1));
                 }
 
-                gizmos.line(Vec3::ZERO, Vec3::Y, SKY_BLUE);
                 gizmos.line(start, end, SKY_BLUE);
                 scanner.progress -= interval;
             }

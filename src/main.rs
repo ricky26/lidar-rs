@@ -1,3 +1,4 @@
+use bevy::input::common_conditions::input_just_pressed;
 use bevy::input::mouse::MouseMotion;
 use bevy::math::vec3;
 use bevy::prelude::*;
@@ -25,7 +26,10 @@ fn main() {
         .add_systems(Update, (
             grab_cursor,
             move_free_cam,
+            toggle_lights.run_if(input_just_pressed(KeyCode::KeyL)),
         ))
+        .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(AmbientLight::NONE)
         .run();
 }
 
@@ -77,6 +81,7 @@ fn startup(
             transform: Transform::from_translation(Vec3::ONE),
             ..default()
         },
+        ToggleLight,
     ));
 
     commands.spawn((
@@ -183,5 +188,21 @@ pub fn move_free_cam(
 
         let move_delta = transform.rotation * move_input * move_modifier * free_cam.move_speed * time.delta_seconds();
         transform.translation += move_delta;
+    }
+}
+
+#[derive(Component, Reflect)]
+#[reflect(Component)]
+struct ToggleLight;
+
+fn toggle_lights(
+    mut lights: Query<&mut Visibility, With<ToggleLight>>,
+) {
+    for mut visibility in &mut lights {
+        let new_visibility = match *visibility {
+            Visibility::Inherited | Visibility::Visible => Visibility::Hidden,
+            Visibility::Hidden => Visibility::Inherited,
+        };
+        *visibility = new_visibility;
     }
 }
