@@ -7,5 +7,5 @@ edition = "2021"
 bytemuck = "1.16.0"
 nonmax = "0.5.5"
 offset-allocator = "0.1.0"
-bevy = { version = "0.14.0-rc.2" }
+bevy = { path = "../bevy" }
 #bevy_xpbd_3d = "0.4.2"

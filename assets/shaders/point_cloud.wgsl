@@ -37,12 +37,12 @@ struct PointCloudIndices {
 fn vertex(in: Vertex) -> VertexOutput {
     let point_cloud = point_clouds[in.instance_index];
     let world_from_local = affine3_to_square(point_cloud.world_from_local);
-    let point_local = point_cloud_points[vert.index / 6];
+    let point_local = point_cloud_points[in.index / 6];
     let point_world = (world_from_local * vec4(point_local.xyz, 1.0)).xyz;
-    let vert_index = vert.index % 6;
-    var uv = vec2(f32((vert_index & 4) != 0), f32(vert_index & 1));
-    if vertex.index >= 3 {
-        uv = vec2(1, 1) - uv;
+    let vert_index = in.index % 6;
+    var uv = vec2(f32((vert_index & 1) != 0), f32((vert_index & 2) != 0 || vert_index == 4));
+    if vert_index >= 3 {
+//        uv = vec2(1, 1) - uv;
     }
 
     let right = view.world_from_view[0].xyz;
@@ -51,7 +51,7 @@ fn vertex(in: Vertex) -> VertexOutput {
     let vert_local = vec3(uv - 0.5, 0.0);
     let vert_world = (world_from_local * vec4(vert_local, 0.0)).xyz * point_local.w;
     let world_position = point_world + right * vert_world.x + up * vert_world.y;
-    let world_normal = normalize(view.world_position - point_position);
+    let world_normal = normalize(view.world_position - point_world);
 
     var out: VertexOutput;
     out.world_position = vec4(world_position, 0);
@@ -62,7 +62,7 @@ fn vertex(in: Vertex) -> VertexOutput {
 
 struct FragmentOutput {
     @location(0) colour: vec4<f32>,
-    @location(1) alpha: f32,
+    @location(1) alpha: vec4<f32>,
 }
 
 fn calculate_fragment_output(z: f32, colour: vec4<f32>) -> FragmentOutput {
@@ -70,13 +70,13 @@ fn calculate_fragment_output(z: f32, colour: vec4<f32>) -> FragmentOutput {
         clamp(0.03 / (1e-5 + pow(z / 200.0, 4.0)), 1e-2, 3e3);
     var out: FragmentOutput;
     out.colour = vec4(colour.rgb * colour.a, colour.a) * weight;
-    out.alpha = colour.a;
+    out.alpha = vec4(colour.a);
     return out;
 }
 
 @fragment
 fn fragment(in: VertexOutput) -> FragmentOutput {
-    let colour = vec4(1.0, 0.0, 1.0, 1.0);
+    let colour = vec4(1.0, 0.0, 1.0, 0.3);
     // TODO: populate colour!
     return calculate_fragment_output(in.clip_position.z, colour);
 }

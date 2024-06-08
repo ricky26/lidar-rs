@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use bevy::math::vec3;
+use bevy::math::{vec3, vec4};
 use bevy::prelude::*;
 use bevy::render::view::NoFrustumCulling;
 use crate::point_cloud::{PointCloudPlugin, PointCloud};
@@ -58,12 +58,12 @@ fn startup(
         SpatialBundle::INHERITED_IDENTITY,
         PointCloud {
             points: Arc::new(vec![
-                vec3(0.0, 0.0, 0.0),
-                vec3(0.0, 1.0, 0.0),
-                vec3(1.0, 0.0, 0.0),
-                vec3(0.0, 0.0, 1.0),
-                vec3(0.0, 0.0, 1.0),
-                vec3(0.0, 1.5, 0.0),
+                vec4(0.0, 0.0, 0.0, 1.0),
+                vec4(0.0, 1.0, 0.0, 1.0),
+                vec4(1.0, 0.0, 0.0, 1.0),
+                vec4(0.0, 0.0, 1.0, 1.0),
+                vec4(0.0, 0.0, 1.0, 1.0),
+                vec4(0.0, 1.5, 0.0, 1.0),
             ]),
         },
     ));

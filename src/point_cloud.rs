@@ -1,5 +1,4 @@
 use std::mem::size_of;
-use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -7,7 +6,7 @@ use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::fullscreen_vertex_shader::fullscreen_shader_vertex_state;
 use bevy::ecs::entity::EntityHashMap;
 use bevy::ecs::query::QueryItem;
-use bevy::ecs::system::lifetimeless::SRes;
+use bevy::ecs::system::lifetimeless::{SRes, SResMut};
 use bevy::ecs::system::SystemParamItem;
 use bevy::math::Affine3;
 use bevy::pbr::{MeshInputUniform, MeshPipeline, MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, PreviousGlobalTransform, SetMeshViewBindGroup};
@@ -15,17 +14,18 @@ use bevy::prelude::*;
 use bevy::render::{Extract, Render, RenderApp, RenderSet};
 use bevy::render::batching::{GetBatchData, GetFullBatchData};
 use bevy::render::batching::gpu_preprocessing::IndirectParametersBuffer;
-use bevy::render::batching::no_gpu_preprocessing::{BatchedInstanceBuffer, write_batched_instance_buffer};
+use bevy::render::batching::no_gpu_preprocessing::{BatchedInstanceBuffer, clear_batched_cpu_instance_buffers, write_batched_instance_buffer};
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::render_graph::{NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, ViewNode, ViewNodeRunner};
 use bevy::render::render_phase::{AddRenderCommand, BinnedPhaseItem, BinnedRenderPhasePlugin, CachedRenderPipelinePhaseItem, DrawFunctionId, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewBinnedRenderPhases};
-use bevy::render::render_resource::{BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FragmentState, MultisampleState, PipelineCache, PrimitiveState, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages, ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, VertexState};
+use bevy::render::render_resource::{BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FragmentState, FrontFace, GpuArrayBuffer, MultisampleState, PipelineCache, PrimitiveState, RawBufferVec, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages, ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, VertexState};
 use bevy::render::render_resource::binding_types::{storage_buffer_read_only, texture_2d_multisampled};
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::{ColorAttachment, TextureCache};
 use bevy::render::view::{check_visibility, ExtractedView, ViewTarget, VisibilitySystems};
+use bytemuck::{Pod, Zeroable};
 use nonmax::NonMaxU32;
-use offset_allocator::Allocation;
+use offset_allocator::{Allocation, Allocator};
 
 #[derive(Clone, Debug, Reflect, Component)]
 #[reflect(Component)]
@@ -33,25 +33,67 @@ pub struct PointCloud {
     pub points: Arc<Vec<Vec4>>,
 }
 
-/*
-pub struct PointCloudBuffers {
-    pub capacity: usize,
-    pub len: usize,
-    pub buffer: Buffer,
-}
- */
-
 pub struct PointCloudInstance {
     pub world_from_local: Affine3,
     pub previous_world_from_local: Affine3,
+    pub num_points: u32,
     pub allocation: Option<Allocation>,
-    // pub buffers: Option<PointCloudBuffers>,
 }
 
 #[derive(Clone, ShaderType)]
 pub struct PointCloudUniform {
     pub world_from_local: [Vec4; 3],
     pub previous_world_from_local: [Vec4; 3],
+}
+
+#[derive(Resource)]
+pub struct PointCloudBuffers {
+    pub point_buffer: Buffer,
+    pub allocator: Allocator,
+}
+
+impl PointCloudBuffers {
+    pub fn new(render_device: &RenderDevice) -> PointCloudBuffers {
+        Self::with_capacity(render_device, 1024 * 1024 * 16)
+    }
+
+    pub fn with_capacity(render_device: &RenderDevice, capacity: u32) -> PointCloudBuffers {
+        let point_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("point cloud buffer"),
+            size: capacity as BufferAddress * size_of::<Vec4>() as BufferAddress,
+            usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let allocator = Allocator::new(capacity);
+        PointCloudBuffers {
+            point_buffer,
+            allocator,
+        }
+    }
+
+    pub fn allocate(
+        &mut self,
+        _render_device: &RenderDevice,
+        render_queue: &RenderQueue,
+        points: &[Vec4],
+    ) -> Allocation {
+        let allocation = self.allocator.allocate(points.len() as u32)
+            .expect("failed to allocate point buffer");
+        render_queue.write_buffer(
+            &self.point_buffer, allocation.offset as BufferAddress, bytemuck::cast_slice(points));
+        allocation
+    }
+
+    pub fn free(&mut self, allocation: Allocation) {
+        self.allocator.free(allocation);
+    }
+}
+
+impl FromWorld for PointCloudBuffers {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+        Self::new(render_device)
+    }
 }
 
 #[derive(Default, Resource, Deref, DerefMut)]
@@ -84,6 +126,7 @@ pub fn extract_point_clouds(
         let is_new = if let Some(existing) = point_cloud_instances.get_mut(&entity) {
             existing.world_from_local = (&transform).into();
             existing.previous_world_from_local = (&previous_transform).into();
+            existing.num_points = point_cloud.points.len() as u32;
             false
         } else {
             point_cloud_instances.insert(
@@ -91,6 +134,7 @@ pub fn extract_point_clouds(
                 PointCloudInstance {
                     world_from_local: (&transform).into(),
                     previous_world_from_local: (&previous_transform).into(),
+                    num_points: point_cloud.points.len() as u32,
                     allocation: None,
                 },
             );
@@ -108,6 +152,7 @@ pub fn upload_point_clouds(
     render_queue: Res<RenderQueue>,
     mut point_clouds: ResMut<PointCloudInstances>,
     mut pending_point_clouds: ResMut<PendingPointClouds>,
+    mut point_cloud_buffers: ResMut<PointCloudBuffers>,
 ) {
     for (entity, points) in pending_point_clouds.drain(..) {
         let Some(point_cloud) = point_clouds.get_mut(&entity) else {
@@ -115,39 +160,10 @@ pub fn upload_point_clouds(
         };
 
         if let Some(allocation) = point_cloud.allocation.take() {
-            // TODO: free allocation
+            point_cloud_buffers.free(allocation);
         }
 
-        // TODO: allocate
-        if let Some(allocation) = None {
-            // render_queue.write_buffer(&buffer.buffer, BufferAddress::default(), bytemuck::cast_slice(&points));
-            point_cloud.allocation = allocation;
-        }
-
-        /*
-        let buffer = match &mut point_cloud.buffers {
-            Some(buffers) if buffers.capacity >= points.len() => {
-                buffers.len = points.len();
-                buffers
-            }
-            _ => {
-                point_cloud.buffers.get_or_insert_with(|| {
-                    let block_size = 1 << 20;
-                    let init_capacity = points.len().div_ceil(block_size) * block_size;
-                    let point_buffer = render_device.create_buffer(&BufferDescriptor {
-                        label: Some("point buffer"),
-                        size: (size_of::<Vec3>() * init_capacity) as BufferAddress,
-                        usage: BufferUsages::COPY_DST | BufferUsages::STORAGE,
-                        mapped_at_creation: false,
-                    });
-                    PointCloudBuffers {
-                        capacity: init_capacity,
-                        len: 0,
-                        buffer: point_buffer,
-                    }
-                })
-            }
-        };*/
+        point_cloud.allocation = Some(point_cloud_buffers.allocate(&render_device, &render_queue, &points));
     }
 }
 
@@ -294,9 +310,8 @@ impl FromWorld for PointCloudPipeline {
             &BindGroupLayoutEntries::sequential(
                 ShaderStages::VERTEX_FRAGMENT,
                 (
-                    storage_buffer_read_only::<PointCloudUniform>(false).count(NonZeroU32::new(16).unwrap()),
-                    storage_buffer_read_only::<Vec3>(false).count(NonZeroU32::new(16).unwrap()),
-                    storage_buffer_read_only::<u32>(false).count(NonZeroU32::new(16).unwrap()),
+                    GpuArrayBuffer::<PointCloudUniform>::binding_layout(render_device),
+                    storage_buffer_read_only::<Vec4>(false),
                 ),
             ),
         );
@@ -363,7 +378,10 @@ impl SpecializedRenderPipeline for PointCloudPipeline {
                 ],
             }),
             layout,
-            primitive: PrimitiveState::default(),
+            primitive: PrimitiveState {
+                cull_mode: None,
+                ..default()
+            },
             depth_stencil: None,
             multisample: MultisampleState {
                 count: key.msaa_samples,
@@ -377,19 +395,23 @@ impl SpecializedRenderPipeline for PointCloudPipeline {
 }
 
 impl GetBatchData for PointCloudPipeline {
-    type Param = SRes<PointCloudInstances>;
+    type Param = (
+        SRes<PointCloudInstances>,
+        SResMut<PointCloudIndirect>,
+    );
     type CompareData = ();
     type BufferData = PointCloudUniform;
 
     fn get_batch_data(
-        point_cloud_instances: &SystemParamItem<Self::Param>,
+        (ref point_cloud_instances, ref mut indirect): &mut SystemParamItem<Self::Param>,
         entity: Entity,
     ) -> Option<(Self::BufferData, Option<Self::CompareData>)> {
-        let point_cloud = point_cloud_instances.get(&entity)?;
+        let instance = point_cloud_instances.get(&entity)?;
+        indirect.push(instance);
         Some((
             PointCloudUniform {
-                world_from_local: point_cloud.world_from_local.to_transpose(),
-                previous_world_from_local: point_cloud.previous_world_from_local.to_transpose(),
+                world_from_local: instance.world_from_local.to_transpose(),
+                previous_world_from_local: instance.previous_world_from_local.to_transpose(),
             },
             Some(())
         ))
@@ -400,10 +422,11 @@ impl GetFullBatchData for PointCloudPipeline {
     type BufferInputData = MeshInputUniform;
 
     fn get_binned_batch_data(
-        point_cloud_instances: &SystemParamItem<Self::Param>,
+        (point_cloud_instances, ref mut indirect): &mut SystemParamItem<Self::Param>,
         entity: Entity,
     ) -> Option<Self::BufferData> {
         let instance = point_cloud_instances.get(&entity)?;
+        indirect.push(instance);
         Some(PointCloudUniform {
             world_from_local: instance.world_from_local.to_transpose(),
             previous_world_from_local: instance.previous_world_from_local.to_transpose(),
@@ -458,11 +481,32 @@ pub struct PointCloudBindGroup {
     pub value: BindGroup,
 }
 
+pub fn write_point_cloud_indirect(
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    mut indirect: ResMut<PointCloudIndirect>,
+    // phases: Res<ViewBinnedRenderPhases<OrderIndependentTransparent3d>>,
+) {
+    // indirect.clear();
+    // let mut first_instance = 0;
+    //
+    // indirect.push(DrawIndirect {
+    //     vertex_count: 6 * point_cloud.num_points,
+    //     instance_count: 1,
+    //     first_vertex: 0,
+    //     first_instance,
+    // });
+    // first_instance += 1;
+    indirect.write_buffer(&render_device, &render_queue);
+    indirect.clear();
+}
+
 pub fn prepare_point_cloud_bind_group(
     mut commands: Commands,
     point_cloud_pipeline: Res<PointCloudPipeline>,
     render_device: Res<RenderDevice>,
     point_cloud_uniforms: Res<BatchedInstanceBuffer<PointCloudUniform>>,
+    point_cloud_buffers: Res<PointCloudBuffers>,
 ) {
     let Some(point_cloud_uniform) = point_cloud_uniforms.binding() else {
         return;
@@ -474,6 +518,7 @@ pub fn prepare_point_cloud_bind_group(
             &point_cloud_pipeline.point_cloud_layout,
             &BindGroupEntries::sequential((
                 point_cloud_uniform,
+                point_cloud_buffers.point_buffer.as_entire_binding(),
             )),
         ),
     });
@@ -508,26 +553,25 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetPointCloudBindGroup<I
 struct DrawPointCloudMesh;
 
 impl<P: PhaseItem> RenderCommand<P> for DrawPointCloudMesh {
-    type Param = SRes<PointCloudInstances>;
+    type Param = SRes<PointCloudIndirect>;
     type ViewQuery = ();
     type ItemQuery = ();
 
     #[inline]
     fn render<'w>(
         item: &P,
-        _view: (),
+        _view: QueryItem<'w, Self::ViewQuery>,
         _entity: Option<()>,
-        point_cloud_instances: SystemParamItem<'w, '_, Self::Param>,
+        indirect: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let Some(point_cloud) = point_cloud_instances.get(&item.entity()) else {
-            return RenderCommandResult::Success;
+        let Some(indirect_buffer) = indirect.into_inner().0.buffer() else {
+            return RenderCommandResult::Failure;
         };
 
-        if let Some(buffers) = point_cloud.buffers.as_ref() {
-            pass.draw(0..6, 0..buffers.len as u32);
-        }
-
+        let range = item.batch_range();
+        let indirect_offset = range.start as BufferAddress * size_of::<DrawIndirect>() as BufferAddress;
+        pass.multi_draw_indirect(indirect_buffer, indirect_offset, range.len() as u32);
         RenderCommandResult::Success
     }
 }
@@ -576,6 +620,36 @@ pub fn prepare_order_independent_transparency_pipeline(
         commands
             .entity(entity)
             .insert(OrderIndependentTransparencyPipelineId(pipeline_id));
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct DrawIndirect {
+    pub vertex_count: u32,
+    pub instance_count: u32,
+    pub first_vertex: u32,
+    pub first_instance: u32,
+}
+
+#[derive(Resource, Deref, DerefMut)]
+pub struct PointCloudIndirect(RawBufferVec<DrawIndirect>);
+
+impl Default for PointCloudIndirect {
+    fn default() -> Self {
+        PointCloudIndirect(RawBufferVec::new(BufferUsages::INDIRECT))
+    }
+}
+
+impl PointCloudIndirect {
+    pub fn push(&mut self, instance: &PointCloudInstance) {
+        let first_instance = self.len() as u32;
+        self.0.push(DrawIndirect {
+            vertex_count: instance.num_points * 6,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance,
+        });
     }
 }
 
@@ -828,7 +902,11 @@ impl Plugin for PointCloudPlugin {
                 prepare_transparent_accumulation_texture.in_set(RenderSet::PrepareResources),
                 write_batched_instance_buffer::<PointCloudPipeline>
                     .in_set(RenderSet::PrepareResourcesFlush),
+                write_point_cloud_indirect.in_set(RenderSet::PrepareResourcesFlush),
                 prepare_point_cloud_bind_group.in_set(RenderSet::PrepareBindGroups),
+                clear_batched_cpu_instance_buffers::<PointCloudPipeline>
+                    .in_set(RenderSet::Cleanup)
+                    .after(RenderSet::Render),
             ))
             .add_render_graph_node::<ViewNodeRunner<OrderIndependentCopyNode>>(
                 Core3d,
@@ -852,6 +930,8 @@ impl Plugin for PointCloudPlugin {
                 .insert_resource(batch_instance_buffer)
                 .init_resource::<PointCloudPipeline>()
                 .init_resource::<PointCloudInstances>()
+                .init_resource::<PointCloudBuffers>()
+                .init_resource::<PointCloudIndirect>()
                 .init_resource::<PendingPointClouds>()
                 .init_resource::<OrderIndependentTransparencyPipeline>();
         }
