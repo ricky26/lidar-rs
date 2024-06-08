@@ -18,7 +18,7 @@ use bevy::render::batching::no_gpu_preprocessing::{BatchedInstanceBuffer, clear_
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::render_graph::{NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, ViewNode, ViewNodeRunner};
 use bevy::render::render_phase::{AddRenderCommand, BinnedPhaseItem, BinnedRenderPhasePlugin, CachedRenderPipelinePhaseItem, DrawFunctionId, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewBinnedRenderPhases};
-use bevy::render::render_resource::{BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FragmentState, FrontFace, GpuArrayBuffer, MultisampleState, PipelineCache, PrimitiveState, RawBufferVec, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages, ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, VertexState};
+use bevy::render::render_resource::{BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FragmentState, GpuArrayBuffer, MultisampleState, PipelineCache, PrimitiveState, RawBufferVec, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages, ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, VertexState};
 use bevy::render::render_resource::binding_types::{storage_buffer_read_only, texture_2d_multisampled};
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::{ColorAttachment, TextureCache};
@@ -302,7 +302,7 @@ pub struct PointCloudPipeline {
 impl FromWorld for PointCloudPipeline {
     fn from_world(world: &mut World) -> Self {
         let asset_server = world.resource::<AssetServer>();
-        let shader = asset_server.load("shaders/point_cloud.wgsl");
+        let shader = asset_server.load("shaders/point_cloud_distance.wgsl");
         let render_device = world.resource::<RenderDevice>();
         let mesh_pipeline = world.resource::<MeshPipeline>();
         let point_cloud_layout = render_device.create_bind_group_layout(
