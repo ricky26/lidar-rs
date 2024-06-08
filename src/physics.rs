@@ -19,12 +19,13 @@ impl PhysicsWorld {
         let Some(world) = self.0.as_ref() else {
             return None;
         };
+        let dir = end - start;
         let ray = Ray {
             origin: Point::from(start.to_array()),
-            dir: Vector::from((end - start).to_array()),
+            dir: Vector::from(dir.to_array()),
         };
         let t = world.cast_local_ray(&ray, 1.0, true)?;
-        Some(start + t * end)
+        Some(start + t * dir)
     }
 }
 
