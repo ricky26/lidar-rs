@@ -6,7 +6,7 @@ use bevy::input::mouse::MouseMotion;
 use bevy::math::{vec2, vec3};
 use bevy::prelude::*;
 use bevy::render::render_resource::encase::private::RuntimeSizedArray;
-use bevy::window::CursorGrabMode;
+use bevy::window::{CursorGrabMode, WindowMode};
 
 use crate::physics::{PhysicsPlugin, PhysicsScene};
 use crate::point_cloud::{PointCloud, PointCloudMaterialPlugin, PointCloudPlugin};
@@ -31,11 +31,12 @@ fn main() {
         ))
         .add_systems(Startup, startup)
         .add_systems(Update, (
-            grab_cursor,
             move_free_cam,
+            toggle_cursor_grab.run_if(input_just_pressed(KeyCode::KeyG)),
             toggle_lights.run_if(input_just_pressed(KeyCode::KeyL)),
             clear_scan.run_if(input_just_pressed(KeyCode::KeyR)),
             toggle_boost.run_if(input_just_pressed(KeyCode::KeyB)),
+            toggle_fullscreen.run_if(input_just_pressed(KeyCode::F11)),
             update_debug_text,
         ))
         .insert_resource(ClearColor(Color::BLACK))
@@ -47,7 +48,13 @@ fn startup(
     asset_server: Res<AssetServer>,
     mut commands: Commands,
     mut distance_materials: ResMut<Assets<PointCloudDistanceMaterial>>,
+    mut windows: Query<&mut Window>,
 ) {
+    for mut window in &mut windows {
+        window.cursor.grab_mode = CursorGrabMode::Locked;
+        window.cursor.visible = false;
+    }
+
     let distance_material = distance_materials.add(PointCloudDistanceMaterial::default());
     let point_cloud = commands
         .spawn((
@@ -155,14 +162,14 @@ impl Default for FreeCam {
     }
 }
 
-pub fn grab_cursor(
+pub fn toggle_cursor_grab(
     mut windows: Query<&mut Window>,
 ) {
     for mut window in &mut windows {
-        let (grab_mode, visible) = if !window.focused {
-            (CursorGrabMode::None, true)
-        } else {
+        let (grab_mode, visible) = if window.cursor.visible {
             (CursorGrabMode::Locked, false)
+        } else {
+            (CursorGrabMode::None, true)
         };
 
         window.cursor.grab_mode = grab_mode;
@@ -241,6 +248,19 @@ fn toggle_boost(
         } else {
             scanner.interval_range = default.interval_range;
         }
+    }
+}
+
+fn toggle_fullscreen(
+    mut windows: Query<&mut Window>,
+) {
+    for mut window in &mut windows {
+        let new_mode = if window.mode == WindowMode::Windowed {
+            WindowMode::BorderlessFullscreen
+        } else {
+            WindowMode::Windowed
+        };
+        window.mode = new_mode;
     }
 }
 
