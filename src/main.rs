@@ -38,6 +38,7 @@ fn main() {
             toggle_boost.run_if(input_just_pressed(KeyCode::KeyB)),
             toggle_fullscreen.run_if(input_just_pressed(KeyCode::F11)),
             update_debug_text,
+            remove_emissive,
         ))
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(AmbientLight::NONE)
@@ -281,5 +282,21 @@ fn update_debug_text(
 
     if let Ok(point_cloud) = point_cloud_query.get_single() {
         write!(&mut section.value, "Points: {}", point_cloud.points.len()).unwrap();
+    }
+}
+
+fn remove_emissive(
+    mut commands: Commands,
+    materials: Res<Assets<StandardMaterial>>,
+    query: Query<(Entity, &Handle<StandardMaterial>), Changed<Handle<StandardMaterial>>>,
+) {
+    for (entity, handle) in &query {
+        let Some(material) = materials.get(handle) else {
+            continue;
+        };
+
+        if material.emissive_texture.is_some() || material.emissive.alpha > 0.0 {
+            commands.entity(entity).remove::<Handle<StandardMaterial>>();
+        }
     }
 }
