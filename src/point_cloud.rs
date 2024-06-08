@@ -1,4 +1,5 @@
 use std::mem::size_of;
+use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -9,104 +10,42 @@ use bevy::ecs::query::QueryItem;
 use bevy::ecs::system::lifetimeless::SRes;
 use bevy::ecs::system::SystemParamItem;
 use bevy::math::Affine3;
-use bevy::pbr::{CLUSTERED_FORWARD_STORAGE_BUFFER_COUNT, generate_view_layouts, MeshPipelineViewLayout, MeshPipelineViewLayoutKey, PreviousGlobalTransform, SetMeshViewBindGroup};
+use bevy::pbr::{MeshInputUniform, MeshPipeline, MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, PreviousGlobalTransform, SetMeshViewBindGroup};
 use bevy::prelude::*;
 use bevy::render::{Extract, Render, RenderApp, RenderSet};
-use bevy::render::batching::{batch_and_prepare_render_phase, GetBatchData, write_batched_instance_buffer};
+use bevy::render::batching::{GetBatchData, GetFullBatchData};
+use bevy::render::batching::gpu_preprocessing::IndirectParametersBuffer;
+use bevy::render::batching::no_gpu_preprocessing::{BatchedInstanceBuffer, write_batched_instance_buffer};
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::render_graph::{NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, ViewNode, ViewNodeRunner};
-use bevy::render::render_phase::{AddRenderCommand, CachedRenderPipelinePhaseItem, DrawFunctionId, DrawFunctions, PhaseItem, RenderCommand, RenderCommandResult, RenderPhase, SetItemPipeline, sort_phase_system, TrackedRenderPass};
-use bevy::render::render_resource::{BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FragmentState, GpuArrayBuffer, MultisampleState, PipelineCache, PrimitiveState, RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, VertexState};
-use bevy::render::render_resource::binding_types::{sampler, texture_2d, texture_2d_multisampled};
+use bevy::render::render_phase::{AddRenderCommand, BinnedPhaseItem, BinnedRenderPhasePlugin, CachedRenderPipelinePhaseItem, DrawFunctionId, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewBinnedRenderPhases};
+use bevy::render::render_resource::{BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FragmentState, MultisampleState, PipelineCache, PrimitiveState, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages, ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, VertexState};
+use bevy::render::render_resource::binding_types::{storage_buffer_read_only, texture_2d_multisampled};
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::{ColorAttachment, TextureCache};
-use bevy::render::view::{ExtractedView, ViewTarget};
-use bevy::utils::{FloatOrd, HashMap};
-use bevy::utils::nonmax::NonMaxU32;
+use bevy::render::view::{check_visibility, ExtractedView, ViewTarget, VisibilitySystems};
+use nonmax::NonMaxU32;
+use offset_allocator::Allocation;
 
 #[derive(Clone, Debug, Reflect, Component)]
 #[reflect(Component)]
 pub struct PointCloud {
-    pub points: Arc<Vec<Vec3>>,
+    pub points: Arc<Vec<Vec4>>,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Axis {
-    XPositive,
-    XNegative,
-    YPositive,
-    YNegative,
-    ZPositive,
-    ZNegative,
-}
-
-impl Axis {
-    const ALL: [Axis; 6] = [
-        Self::XPositive,
-        Self::XNegative,
-        Self::YPositive,
-        Self::YNegative,
-        Self::ZPositive,
-        Self::ZNegative,
-    ];
-
-    #[inline(always)]
-    fn from_f32(value: f32, positive: Axis, negative: Axis) -> Axis {
-        if value < 0. {
-            negative
-        } else {
-            positive
-        }
-    }
-
-    pub fn direction(self) -> Vec3 {
-        match self {
-            Axis::XPositive => Vec3::X,
-            Axis::XNegative => Vec3::NEG_X,
-            Axis::YPositive => Vec3::Y,
-            Axis::YNegative => Vec3::NEG_Y,
-            Axis::ZPositive => Vec3::Z,
-            Axis::ZNegative => Vec3::NEG_Z,
-        }
-    }
-
-    pub fn index(self) -> usize {
-        match self {
-            Axis::XPositive => 0,
-            Axis::XNegative => 1,
-            Axis::YPositive => 2,
-            Axis::YNegative => 3,
-            Axis::ZPositive => 4,
-            Axis::ZNegative => 5,
-        }
-    }
-}
-
-impl From<Vec3> for Axis {
-    fn from(value: Vec3) -> Self {
-        let abs = value.abs();
-        let max = abs.max_element();
-        if max == abs.z {
-            Self::from_f32(value.z, Self::ZPositive, Self::ZNegative)
-        } else if max == abs.y {
-            Self::from_f32(value.y, Self::YPositive, Self::YNegative)
-        } else {
-            Self::from_f32(value.x, Self::XPositive, Self::XNegative)
-        }
-    }
-}
-
+/*
 pub struct PointCloudBuffers {
     pub capacity: usize,
     pub len: usize,
-    pub point_buffer: Buffer,
-    pub index_buffer: Buffer,
+    pub buffer: Buffer,
 }
+ */
 
 pub struct PointCloudInstance {
     pub world_from_local: Affine3,
     pub previous_world_from_local: Affine3,
-    pub buffers: Option<PointCloudBuffers>,
+    pub allocation: Option<Allocation>,
+    // pub buffers: Option<PointCloudBuffers>,
 }
 
 #[derive(Clone, ShaderType)]
@@ -119,7 +58,7 @@ pub struct PointCloudUniform {
 pub struct PointCloudInstances(EntityHashMap<PointCloudInstance>);
 
 #[derive(Default, Resource, Deref, DerefMut)]
-pub struct PendingPointClouds(Vec<(Entity, Arc<Vec<Vec3>>)>);
+pub struct PendingPointClouds(Vec<(Entity, Arc<Vec<Vec4>>)>);
 
 pub fn extract_point_clouds(
     mut point_cloud_instances: ResMut<PointCloudInstances>,
@@ -152,7 +91,7 @@ pub fn extract_point_clouds(
                 PointCloudInstance {
                     world_from_local: (&transform).into(),
                     previous_world_from_local: (&previous_transform).into(),
-                    buffers: None,
+                    allocation: None,
                 },
             );
             true
@@ -169,14 +108,23 @@ pub fn upload_point_clouds(
     render_queue: Res<RenderQueue>,
     mut point_clouds: ResMut<PointCloudInstances>,
     mut pending_point_clouds: ResMut<PendingPointClouds>,
-    mut scratch_distance: Local<Vec<f32>>,
-    mut scratch_indices: Local<Vec<u32>>,
 ) {
     for (entity, points) in pending_point_clouds.drain(..) {
         let Some(point_cloud) = point_clouds.get_mut(&entity) else {
             continue;
         };
 
+        if let Some(allocation) = point_cloud.allocation.take() {
+            // TODO: free allocation
+        }
+
+        // TODO: allocate
+        if let Some(allocation) = None {
+            // render_queue.write_buffer(&buffer.buffer, BufferAddress::default(), bytemuck::cast_slice(&points));
+            point_cloud.allocation = allocation;
+        }
+
+        /*
         let buffer = match &mut point_cloud.buffers {
             Some(buffers) if buffers.capacity >= points.len() => {
                 buffers.len = points.len();
@@ -192,78 +140,50 @@ pub fn upload_point_clouds(
                         usage: BufferUsages::COPY_DST | BufferUsages::STORAGE,
                         mapped_at_creation: false,
                     });
-                    let index_buffer = render_device.create_buffer(&BufferDescriptor {
-                        label: Some("index buffer"),
-                        size: (size_of::<u32>() * init_capacity * 6) as BufferAddress,
-                        usage: BufferUsages::COPY_DST | BufferUsages::STORAGE,
-                        mapped_at_creation: false,
-                    });
                     PointCloudBuffers {
                         capacity: init_capacity,
                         len: 0,
-                        point_buffer,
-                        index_buffer,
+                        buffer: point_buffer,
                     }
                 })
             }
-        };
-
-        for axis in Axis::ALL {
-            let start = scratch_indices.len();
-            scratch_indices.extend(0..(points.len() as u32));
-            let end = scratch_indices.len();
-            let slice = &mut scratch_indices[start..end];
-            let dir = axis.direction();
-            scratch_distance.extend(points.iter()
-                .copied()
-                .map(|p| p.dot(dir)));
-            slice.sort_by(|idx_a, idx_b| {
-                let d_a = scratch_distance[*idx_a as usize];
-                let d_b = scratch_distance[*idx_b as usize];
-                d_a.partial_cmp(&d_b).unwrap()
-            });
-            scratch_distance.clear();
-        }
-
-        render_queue.write_buffer(&buffer.point_buffer, BufferAddress::default(), bytemuck::cast_slice(&points));
-        render_queue.write_buffer(&buffer.index_buffer, BufferAddress::default(), bytemuck::cast_slice(&scratch_indices));
-        scratch_indices.clear();
+        };*/
     }
 }
 
 pub fn queue_point_clouds(
-    transparent_3d_draw_functions: Res<DrawFunctions<OrderIndependentTransparent3d>>,
+    draw_functions: Res<DrawFunctions<OrderIndependentTransparent3d>>,
     point_cloud_pipeline: Res<PointCloudPipeline>,
     msaa: Res<Msaa>,
     mut pipelines: ResMut<SpecializedRenderPipelines<PointCloudPipeline>>,
     pipeline_cache: Res<PipelineCache>,
     point_cloud_instances: Res<PointCloudInstances>,
-    mut views: Query<(&ExtractedView, &mut RenderPhase<OrderIndependentTransparent3d>)>,
+    mut transparent_phases: ResMut<ViewBinnedRenderPhases<OrderIndependentTransparent3d>>,
+    mut views: Query<Entity, With<ExtractedView>>,
 ) {
-    let draw_point_cloud = transparent_3d_draw_functions.read().id::<DrawPointCloud>();
+    let draw_point_cloud = draw_functions.read().id::<DrawPointCloud>();
     let view_key = if msaa.samples() > 1 {
         MeshPipelineViewLayoutKey::MULTISAMPLED
     } else {
         MeshPipelineViewLayoutKey::empty()
     };
-    let key = PointCloudPipelineKey {
+    let pipeline_key = PointCloudPipelineKey {
         msaa_samples: msaa.samples(),
         view_key,
     };
-    for (view, mut transparent_phase) in &mut views {
-        let rangefinder = view.rangefinder3d();
-        for (entity, instance) in &point_cloud_instances.0 {
+    for view_entity in &mut views {
+        let Some(transparent_phase) = transparent_phases.get_mut(&view_entity) else {
+            continue;
+        };
+
+        for entity in point_cloud_instances.keys().copied() {
             let pipeline = pipelines
-                .specialize(&pipeline_cache, &point_cloud_pipeline, key.clone());
-            transparent_phase.add(OrderIndependentTransparent3d {
-                entity: *entity,
+                .specialize(&pipeline_cache, &point_cloud_pipeline, pipeline_key.clone());
+            let key = OrderIndependentTransparent3dBinKey {
                 pipeline,
                 draw_function: draw_point_cloud,
-                distance: rangefinder
-                    .distance_translation(&instance.world_from_local.translation),
-                batch_range: 0..1,
-                dynamic_offset: None,
-            });
+            };
+            transparent_phase.add(key, entity, true);
         }
     }
 }
@@ -278,7 +198,6 @@ pub struct OrderIndependentTransparencyPipelineKey {
 pub struct OrderIndependentTransparencyPipeline {
     shader: Handle<Shader>,
     layout: BindGroupLayout,
-    sampler: Sampler,
 }
 
 impl FromWorld for OrderIndependentTransparencyPipeline {
@@ -293,15 +212,12 @@ impl FromWorld for OrderIndependentTransparencyPipeline {
                 (
                     texture_2d_multisampled(TextureSampleType::Float { filterable: false }),
                     texture_2d_multisampled(TextureSampleType::Float { filterable: false }),
-                    sampler(SamplerBindingType::Filtering),
                 ),
             ),
         );
-        let sampler = render_device.create_sampler(&SamplerDescriptor::default());
         OrderIndependentTransparencyPipeline {
             shader,
             layout,
-            sampler,
         }
     }
 }
@@ -320,6 +236,11 @@ impl SpecializedRenderPipeline for OrderIndependentTransparencyPipeline {
             shader_defs.push("MULTISAMPLED".into());
         }
 
+        let blend = BlendComponent {
+            src_factor: BlendFactor::OneMinusSrcAlpha,
+            dst_factor: BlendFactor::SrcAlpha,
+            operation: BlendOperation::Add,
+        };
         RenderPipelineDescriptor {
             vertex: fullscreen_shader_vertex_state(),
             fragment: Some(FragmentState {
@@ -328,7 +249,10 @@ impl SpecializedRenderPipeline for OrderIndependentTransparencyPipeline {
                 entry_point: "fs_main".into(),
                 targets: vec![Some(ColorTargetState {
                     format: TextureFormat::Rgba8UnormSrgb,
-                    blend: Some(BlendState::REPLACE),
+                    blend: Some(BlendState {
+                        color: blend,
+                        alpha: blend,
+                    }),
                     write_mask: ColorWrites::ALL,
                 })],
             }),
@@ -346,15 +270,6 @@ impl SpecializedRenderPipeline for OrderIndependentTransparencyPipeline {
     }
 }
 
-const ADDITIVE_BLENDING: BlendState = BlendState {
-    color: BlendComponent {
-        src_factor: BlendFactor::One,
-        dst_factor: BlendFactor::One,
-        operation: BlendOperation::Add,
-    },
-    alpha: BlendComponent::OVER,
-};
-
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct PointCloudPipelineKey {
     msaa_samples: u32,
@@ -364,7 +279,7 @@ pub struct PointCloudPipelineKey {
 #[derive(Resource)]
 pub struct PointCloudPipeline {
     shader: Handle<Shader>,
-    view_layouts: [MeshPipelineViewLayout; MeshPipelineViewLayoutKey::COUNT],
+    view_layouts: MeshPipelineViewLayouts,
     point_cloud_layout: BindGroupLayout,
 }
 
@@ -373,23 +288,22 @@ impl FromWorld for PointCloudPipeline {
         let asset_server = world.resource::<AssetServer>();
         let shader = asset_server.load("shaders/point_cloud.wgsl");
         let render_device = world.resource::<RenderDevice>();
-        let clustered_forward_buffer_binding_type = render_device
-            .get_supported_read_only_binding_type(CLUSTERED_FORWARD_STORAGE_BUFFER_COUNT);
-        let view_layouts =
-            generate_view_layouts(&render_device, clustered_forward_buffer_binding_type);
+        let mesh_pipeline = world.resource::<MeshPipeline>();
         let point_cloud_layout = render_device.create_bind_group_layout(
             "point_cloud_layout",
             &BindGroupLayoutEntries::sequential(
                 ShaderStages::VERTEX_FRAGMENT,
                 (
-                    GpuArrayBuffer::<PointCloudUniform>::binding_layout(render_device),
+                    storage_buffer_read_only::<PointCloudUniform>(false).count(NonZeroU32::new(16).unwrap()),
+                    storage_buffer_read_only::<Vec3>(false).count(NonZeroU32::new(16).unwrap()),
+                    storage_buffer_read_only::<u32>(false).count(NonZeroU32::new(16).unwrap()),
                 ),
             ),
         );
 
         PointCloudPipeline {
             shader,
-            view_layouts,
+            view_layouts: mesh_pipeline.view_layouts.clone(),
             point_cloud_layout,
         }
     }
@@ -407,6 +321,16 @@ impl SpecializedRenderPipeline for PointCloudPipeline {
             self.point_cloud_layout.clone(),
         ];
 
+        let blend_add = BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        };
+        let blend_dissolve = BlendComponent {
+            src_factor: BlendFactor::Zero,
+            dst_factor: BlendFactor::OneMinusSrcAlpha,
+            operation: BlendOperation::Add,
+        };
         let shader_defs = vec![];
         RenderPipelineDescriptor {
             vertex: VertexState {
@@ -419,11 +343,24 @@ impl SpecializedRenderPipeline for PointCloudPipeline {
                 shader: self.shader.clone(),
                 shader_defs,
                 entry_point: "fragment".into(),
-                targets: vec![Some(ColorTargetState {
-                    format: TextureFormat::Rgba16Float,
-                    blend: Some(ADDITIVE_BLENDING),
-                    write_mask: ColorWrites::ALL,
-                })],
+                targets: vec![
+                    Some(ColorTargetState {
+                        format: TextureFormat::Rgba16Float,
+                        blend: Some(BlendState {
+                            color: blend_add,
+                            alpha: blend_add,
+                        }),
+                        write_mask: ColorWrites::ALL,
+                    }),
+                    Some(ColorTargetState {
+                        format: TextureFormat::R16Float,
+                        blend: Some(BlendState {
+                            color: blend_dissolve,
+                            alpha: blend_dissolve,
+                        }),
+                        write_mask: ColorWrites::ALL,
+                    }),
+                ],
             }),
             layout,
             primitive: PrimitiveState::default(),
@@ -459,6 +396,63 @@ impl GetBatchData for PointCloudPipeline {
     }
 }
 
+impl GetFullBatchData for PointCloudPipeline {
+    type BufferInputData = MeshInputUniform;
+
+    fn get_binned_batch_data(
+        point_cloud_instances: &SystemParamItem<Self::Param>,
+        entity: Entity,
+    ) -> Option<Self::BufferData> {
+        let instance = point_cloud_instances.get(&entity)?;
+        Some(PointCloudUniform {
+            world_from_local: instance.world_from_local.to_transpose(),
+            previous_world_from_local: instance.previous_world_from_local.to_transpose(),
+        })
+    }
+
+    fn get_index_and_compare_data(
+        _point_cloud_instances: &SystemParamItem<Self::Param>,
+        _entity: Entity,
+    ) -> Option<(NonMaxU32, Option<Self::CompareData>)> {
+        unreachable!();
+        /*
+        let point_cloud_instance = point_cloud_instances.get(&entity)?;
+        Some((
+            point_cloud_instance.current_uniform_index,
+            Some(())
+        ))
+         */
+    }
+
+    fn get_binned_index(
+        _point_cloud_instances: &SystemParamItem<Self::Param>,
+        _entity: Entity,
+    ) -> Option<NonMaxU32> {
+        unreachable!();
+        /*
+        point_cloud_instances
+            .get(&entity)
+            .map(|entity| entity.current_uniform_index)
+         */
+    }
+
+    fn get_batch_indirect_parameters_index(
+        _point_cloud_instances: &SystemParamItem<Self::Param>,
+        _indirect_parameters_buffer: &mut IndirectParametersBuffer,
+        _entity: Entity,
+        _instance_index: u32,
+    ) -> Option<NonMaxU32> {
+        unreachable!();
+        /*get_batch_indirect_parameters_index(
+            mesh_instances,
+            meshes,
+            indirect_parameters_buffer,
+            entity,
+            instance_index,
+        )*/
+    }
+}
+
 #[derive(Resource)]
 pub struct PointCloudBindGroup {
     pub value: BindGroup,
@@ -468,17 +462,21 @@ pub fn prepare_point_cloud_bind_group(
     mut commands: Commands,
     point_cloud_pipeline: Res<PointCloudPipeline>,
     render_device: Res<RenderDevice>,
-    point_cloud_uniforms: Res<GpuArrayBuffer<PointCloudUniform>>,
+    point_cloud_uniforms: Res<BatchedInstanceBuffer<PointCloudUniform>>,
 ) {
-    if let Some(binding) = point_cloud_uniforms.binding() {
-        commands.insert_resource(PointCloudBindGroup {
-            value: render_device.create_bind_group(
-                "point_cloud_bind_group",
-                &point_cloud_pipeline.point_cloud_layout,
-                &BindGroupEntries::single(binding),
-            ),
-        });
-    }
+    let Some(point_cloud_uniform) = point_cloud_uniforms.binding() else {
+        return;
+    };
+
+    commands.insert_resource(PointCloudBindGroup {
+        value: render_device.create_bind_group(
+            "point_cloud_bind_group",
+            &point_cloud_pipeline.point_cloud_layout,
+            &BindGroupEntries::sequential((
+                point_cloud_uniform,
+            )),
+        ),
+    });
 }
 
 type DrawPointCloud = (
@@ -535,16 +533,18 @@ impl<P: PhaseItem> RenderCommand<P> for DrawPointCloudMesh {
 }
 
 pub fn extract_camera_phases(
-    mut commands: Commands,
-    cameras_3d: Extract<Query<(Entity, &Camera), With<Camera3d>>>,
+    mut transparent_phases: ResMut<ViewBinnedRenderPhases<OrderIndependentTransparent3d>>,
+    cameras: Extract<Query<(Entity, &Camera), With<Camera3d>>>,
 ) {
-    for (entity, camera) in &cameras_3d {
-        if camera.is_active {
-            commands.get_or_spawn(entity).insert((
-                RenderPhase::<OrderIndependentTransparent3d>::default(),
-            ));
+    for (entity, camera) in &cameras {
+        if !camera.is_active {
+            continue;
         }
+
+        transparent_phases.insert_or_clear(entity);
     }
+
+    transparent_phases.retain(|e, _| cameras.contains(*e));
 }
 
 #[derive(Component)]
@@ -590,13 +590,9 @@ pub fn prepare_transparent_accumulation_texture(
     mut texture_cache: ResMut<TextureCache>,
     msaa: Res<Msaa>,
     render_device: Res<RenderDevice>,
-    views_3d: Query<
-        (Entity, &ExtractedCamera),
-        With<RenderPhase<OrderIndependentTransparent3d>>,
-    >,
+    views: Query<(Entity, &ExtractedCamera)>,
 ) {
-    let mut textures = HashMap::default();
-    for (entity, camera) in &views_3d {
+    for (entity, camera) in &views {
         let Some(physical_target_size) = camera.physical_target_size else {
             continue;
         };
@@ -607,78 +603,66 @@ pub fn prepare_transparent_accumulation_texture(
             height: physical_target_size.y,
         };
 
-        let colour_texture = textures
-            .entry(camera.target.clone())
-            .or_insert_with(|| {
-                let descriptor = TextureDescriptor {
-                    label: Some("transparency colour texture"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: msaa.samples(),
-                    dimension: TextureDimension::D2,
-                    format: TextureFormat::Rgba16Float,
-                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[TextureFormat::Rgba16Float],
-                };
+        let colour_texture = {
+            let descriptor = TextureDescriptor {
+                label: Some("transparency colour texture"),
+                size,
+                mip_level_count: 1,
+                sample_count: msaa.samples(),
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba16Float,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[TextureFormat::Rgba16Float],
+            };
 
-                texture_cache.get(&render_device, descriptor)
-            })
-            .clone();
+            texture_cache.get(&render_device, descriptor)
+        };
 
-        let alpha_texture = textures
-            .entry(camera.target.clone())
-            .or_insert_with(|| {
-                let descriptor = TextureDescriptor {
-                    label: Some("transparency alpha texture"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: msaa.samples(),
-                    dimension: TextureDimension::D2,
-                    format: TextureFormat::R16Float,
-                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[TextureFormat::R16Float],
-                };
+        let alpha_texture = {
+            let descriptor = TextureDescriptor {
+                label: Some("transparency alpha texture"),
+                size,
+                mip_level_count: 1,
+                sample_count: msaa.samples(),
+                dimension: TextureDimension::D2,
+                format: TextureFormat::R16Float,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[TextureFormat::R16Float],
+            };
 
-                texture_cache.get(&render_device, descriptor)
-            })
-            .clone();
+            texture_cache.get(&render_device, descriptor)
+        };
 
         commands.entity(entity).insert(TransparentAccumulationTexture {
-            color_attachment: ColorAttachment::new(colour_texture, None, Some(Color::NONE)),
-            alpha_attachment: ColorAttachment::new(alpha_texture, None, Some(Color::NONE)),
+            color_attachment: ColorAttachment::new(colour_texture, None, Some(LinearRgba::NONE)),
+            alpha_attachment: ColorAttachment::new(alpha_texture, None, Some(LinearRgba::WHITE)),
         });
     }
 }
 
-pub struct OrderIndependentTransparent3d {
-    pub distance: f32,
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OrderIndependentTransparent3dBinKey {
     pub pipeline: CachedRenderPipelineId,
-    pub entity: Entity,
     pub draw_function: DrawFunctionId,
+}
+
+pub struct OrderIndependentTransparent3d {
+    pub key: OrderIndependentTransparent3dBinKey,
+    pub entity: Entity,
     pub batch_range: Range<u32>,
-    pub dynamic_offset: Option<NonMaxU32>,
+    pub extra_index: PhaseItemExtraIndex,
 }
 
 impl PhaseItem for OrderIndependentTransparent3d {
-    type SortKey = FloatOrd;
-
     #[inline]
     fn entity(&self) -> Entity {
         self.entity
     }
 
     #[inline]
-    fn sort_key(&self) -> Self::SortKey {
-        FloatOrd(self.distance)
-    }
-
-    #[inline]
     fn draw_function(&self) -> DrawFunctionId {
-        self.draw_function
+        self.key.draw_function
     }
-
-    #[inline]
-    fn sort(_items: &mut [Self]) {}
 
     #[inline]
     fn batch_range(&self) -> &Range<u32> {
@@ -691,20 +675,38 @@ impl PhaseItem for OrderIndependentTransparent3d {
     }
 
     #[inline]
-    fn dynamic_offset(&self) -> Option<NonMaxU32> {
-        self.dynamic_offset
+    fn extra_index(&self) -> PhaseItemExtraIndex {
+        self.extra_index
     }
 
     #[inline]
-    fn dynamic_offset_mut(&mut self) -> &mut Option<NonMaxU32> {
-        &mut self.dynamic_offset
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
+        (&mut self.batch_range, &mut self.extra_index)
+    }
+}
+
+impl BinnedPhaseItem for OrderIndependentTransparent3d {
+    type BinKey = OrderIndependentTransparent3dBinKey;
+
+    fn new(
+        key: Self::BinKey,
+        representative_entity: Entity,
+        batch_range: Range<u32>,
+        extra_index: PhaseItemExtraIndex,
+    ) -> Self {
+        OrderIndependentTransparent3d {
+            key,
+            entity: representative_entity,
+            batch_range,
+            extra_index,
+        }
     }
 }
 
 impl CachedRenderPipelinePhaseItem for OrderIndependentTransparent3d {
     #[inline]
     fn cached_pipeline(&self) -> CachedRenderPipelineId {
-        self.pipeline
+        self.key.pipeline
     }
 }
 
@@ -717,7 +719,6 @@ pub struct OrderIndependentCopyNode;
 impl ViewNode for OrderIndependentCopyNode {
     type ViewQuery = (
         &'static ExtractedCamera,
-        &'static RenderPhase<OrderIndependentTransparent3d>,
         &'static ViewTarget,
         &'static TransparentAccumulationTexture,
         &'static OrderIndependentTransparencyPipelineId,
@@ -727,12 +728,22 @@ impl ViewNode for OrderIndependentCopyNode {
         &self,
         graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (camera, phase, target, temp_texture, copy_pipeline): QueryItem<Self::ViewQuery>,
+        (camera, target, temp_texture, copy_pipeline): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let Some(transparent_phases) =
+            world.get_resource::<ViewBinnedRenderPhases<OrderIndependentTransparent3d>>()
+            else {
+                return Ok(());
+            };
+
+        let view_entity = graph.view_entity();
+        let Some(transparent_phase) = transparent_phases.get(&view_entity) else {
+            return Ok(());
+        };
         let view_entity = graph.view_entity();
 
-        if !phase.items.is_empty() {
+        if !transparent_phase.is_empty() {
             let _oit_transparent_pass_3d_span = info_span!("oit_transparent_pass_3d").entered();
 
             {
@@ -751,7 +762,7 @@ impl ViewNode for OrderIndependentCopyNode {
                     render_pass.set_camera_viewport(viewport);
                 }
 
-                phase.render(&mut render_pass, world, view_entity);
+                transparent_phase.render(&mut render_pass, world, view_entity);
             }
 
             {
@@ -762,7 +773,6 @@ impl ViewNode for OrderIndependentCopyNode {
                     &BindGroupEntries::sequential((
                         &temp_texture.color_attachment.texture.default_view,
                         &temp_texture.alpha_attachment.texture.default_view,
-                        &pipeline.sampler,
                     )),
                 );
 
@@ -795,6 +805,13 @@ pub struct PointCloudPlugin;
 
 impl Plugin for PointCloudPlugin {
     fn build(&self, app: &mut App) {
+        app
+            .add_plugins((
+                BinnedRenderPhasePlugin::<OrderIndependentTransparent3d, PointCloudPipeline>::default(),
+            ))
+            .add_systems(PostUpdate, (
+                check_visibility::<With<PointCloud>>.in_set(VisibilitySystems::CheckVisibility),
+            ));
         app.sub_app_mut(RenderApp)
             .init_resource::<SpecializedRenderPipelines<PointCloudPipeline>>()
             .init_resource::<SpecializedRenderPipelines<OrderIndependentTransparencyPipeline>>()
@@ -806,12 +823,9 @@ impl Plugin for PointCloudPlugin {
             ))
             .add_systems(Render, (
                 queue_point_clouds.in_set(RenderSet::QueueMeshes),
-                sort_phase_system::<OrderIndependentTransparent3d>.in_set(RenderSet::PhaseSort),
                 prepare_order_independent_transparency_pipeline.in_set(RenderSet::Prepare),
                 upload_point_clouds.in_set(RenderSet::PrepareResources),
                 prepare_transparent_accumulation_texture.in_set(RenderSet::PrepareResources),
-                batch_and_prepare_render_phase::<OrderIndependentTransparent3d, PointCloudPipeline>
-                    .in_set(RenderSet::PrepareResources),
                 write_batched_instance_buffer::<PointCloudPipeline>
                     .in_set(RenderSet::PrepareResourcesFlush),
                 prepare_point_cloud_bind_group.in_set(RenderSet::PrepareBindGroups),
@@ -831,11 +845,11 @@ impl Plugin for PointCloudPlugin {
     }
 
     fn finish(&self, app: &mut App) {
-        if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            let render_device = render_app.world().resource::<RenderDevice>();
+            let batch_instance_buffer = BatchedInstanceBuffer::<PointCloudUniform>::new(render_device);
             render_app
-                .insert_resource(GpuArrayBuffer::<PointCloudUniform>::new(
-                    render_app.world.resource::<RenderDevice>(),
-                ))
+                .insert_resource(batch_instance_buffer)
                 .init_resource::<PointCloudPipeline>()
                 .init_resource::<PointCloudInstances>()
                 .init_resource::<PendingPointClouds>()
