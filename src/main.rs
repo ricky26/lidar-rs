@@ -1,12 +1,10 @@
-use std::sync::Arc;
-
 use bevy::input::mouse::MouseMotion;
-use bevy::math::{vec3, vec4};
+use bevy::math::vec3;
 use bevy::prelude::*;
-use bevy::render::view::NoFrustumCulling;
 use bevy::window::CursorGrabMode;
 
-use crate::point_cloud::{PointCloud, PointCloudPlugin};
+use crate::point_cloud::{PointCloud, PointCloudMaterialPlugin, PointCloudPlugin};
+use crate::point_cloud::distance_material::PointCloudDistanceMaterial;
 use crate::scanner::{Scanner, ScannerPlugin};
 use crate::transparency::OrderIndependentTransparencyPlugin;
 
@@ -20,6 +18,7 @@ fn main() {
             DefaultPlugins,
             OrderIndependentTransparencyPlugin,
             PointCloudPlugin,
+            PointCloudMaterialPlugin::<PointCloudDistanceMaterial>::default(),
             ScannerPlugin,
         ))
         .add_systems(Startup, startup)
@@ -34,18 +33,15 @@ fn startup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut distance_materials: ResMut<Assets<PointCloudDistanceMaterial>>
 ) {
-    commands.spawn((
-        Name::new("PointCloud"),
-        SpatialBundle::INHERITED_IDENTITY,
-        NoFrustumCulling,
-    ));
-
+    let distance_material = distance_materials.add(PointCloudDistanceMaterial::default());
     let point_cloud = commands
         .spawn((
             Name::new("PointCloud"),
             SpatialBundle::INHERITED_IDENTITY,
             PointCloud::default(),
+            distance_material,
         ))
         .id();
 

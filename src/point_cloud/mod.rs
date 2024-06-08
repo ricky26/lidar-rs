@@ -6,24 +6,29 @@ use bevy::ecs::query::QueryItem;
 use bevy::ecs::system::lifetimeless::{SRes, SResMut};
 use bevy::ecs::system::SystemParamItem;
 use bevy::math::Affine3;
-use bevy::pbr::{MeshInputUniform, MeshPipeline, MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, PreviousGlobalTransform, SetMeshViewBindGroup};
+use bevy::pbr::{MeshInputUniform, MeshPipeline, MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, PreviousGlobalTransform};
 use bevy::prelude::*;
 use bevy::render::{Extract, Render, RenderApp, RenderSet};
 use bevy::render::batching::{GetBatchData, GetFullBatchData};
 use bevy::render::batching::gpu_preprocessing::IndirectParametersBuffer;
 use bevy::render::batching::no_gpu_preprocessing::{BatchedInstanceBuffer, clear_batched_cpu_instance_buffers, write_batched_instance_buffer};
 use bevy::render::camera::ExtractedCamera;
-use bevy::render::render_phase::{AddRenderCommand, BinnedRenderPhasePlugin, DrawFunctions, PhaseItem, RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewBinnedRenderPhases};
-use bevy::render::render_resource::{BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, Extent3d, FragmentState, GpuArrayBuffer, MultisampleState, PipelineCache, PrimitiveState, RawBufferVec, RenderPipelineDescriptor, ShaderStages, ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, VertexState};
+use bevy::render::render_phase::{BinnedRenderPhasePlugin, PhaseItem, RenderCommand, RenderCommandResult, TrackedRenderPass, ViewBinnedRenderPhases};
+use bevy::render::render_resource::{BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferAddress, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, Extent3d, FragmentState, GpuArrayBuffer, MultisampleState, PrimitiveState, RawBufferVec, RenderPipelineDescriptor, ShaderStages, ShaderType, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, VertexState};
 use bevy::render::render_resource::binding_types::storage_buffer_read_only;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::{ColorAttachment, TextureCache};
-use bevy::render::view::{check_visibility, ExtractedView, VisibilitySystems};
+use bevy::render::view::{check_visibility, VisibilitySystems};
 use bytemuck::{Pod, Zeroable};
 use nonmax::NonMaxU32;
 use offset_allocator::{Allocation, Allocator};
 
-use crate::transparency::{OrderIndependentTransparent3d, OrderIndependentTransparent3dBinKey};
+pub use material::{PointCloudMaterial, PointCloudMaterialPipelineKey, PointCloudMaterialPipeline, PointCloudMaterialPlugin, PreparedPointCloudMaterial, SetPointCloudMaterialBindGroup, queue_material_point_clouds};
+
+use crate::transparency::OrderIndependentTransparent3d;
+
+mod material;
+pub mod distance_material;
 
 #[derive(Clone, Debug, Default, Reflect, Component)]
 #[reflect(Component)]
@@ -166,50 +171,13 @@ pub fn upload_point_clouds(
     }
 }
 
-pub fn queue_point_clouds(
-    draw_functions: Res<DrawFunctions<OrderIndependentTransparent3d>>,
-    point_cloud_pipeline: Res<PointCloudPipeline>,
-    msaa: Res<Msaa>,
-    mut pipelines: ResMut<SpecializedRenderPipelines<PointCloudPipeline>>,
-    pipeline_cache: Res<PipelineCache>,
-    point_cloud_instances: Res<PointCloudInstances>,
-    mut transparent_phases: ResMut<ViewBinnedRenderPhases<OrderIndependentTransparent3d>>,
-    mut views: Query<Entity, With<ExtractedView>>,
-) {
-    let draw_point_cloud = draw_functions.read().id::<DrawPointCloud>();
-    let view_key = if msaa.samples() > 1 {
-        MeshPipelineViewLayoutKey::MULTISAMPLED
-    } else {
-        MeshPipelineViewLayoutKey::empty()
-    };
-    let pipeline_key = PointCloudPipelineKey {
-        msaa_samples: msaa.samples(),
-        view_key,
-    };
-    for view_entity in &mut views {
-        let Some(transparent_phase) = transparent_phases.get_mut(&view_entity) else {
-            continue;
-        };
-
-        for entity in point_cloud_instances.keys().copied() {
-            let pipeline = pipelines
-                .specialize(&pipeline_cache, &point_cloud_pipeline, pipeline_key.clone());
-            let key = OrderIndependentTransparent3dBinKey {
-                pipeline,
-                draw_function: draw_point_cloud,
-            };
-            transparent_phase.add(key, entity, true);
-        }
-    }
-}
-
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct PointCloudPipelineKey {
     msaa_samples: u32,
     view_key: MeshPipelineViewLayoutKey,
 }
 
-#[derive(Resource)]
+#[derive(Clone, Resource)]
 pub struct PointCloudPipeline {
     shader: Handle<Shader>,
     view_layouts: MeshPipelineViewLayouts,
@@ -219,7 +187,7 @@ pub struct PointCloudPipeline {
 impl FromWorld for PointCloudPipeline {
     fn from_world(world: &mut World) -> Self {
         let asset_server = world.resource::<AssetServer>();
-        let shader = asset_server.load("shaders/point_cloud_distance.wgsl");
+        let shader = asset_server.load("shaders/point_cloud_default.wgsl");
         let render_device = world.resource::<RenderDevice>();
         let mesh_pipeline = world.resource::<MeshPipeline>();
         let point_cloud_layout = render_device.create_bind_group_layout(
@@ -355,13 +323,6 @@ impl GetFullBatchData for PointCloudPipeline {
         _entity: Entity,
     ) -> Option<(NonMaxU32, Option<Self::CompareData>)> {
         unreachable!();
-        /*
-        let point_cloud_instance = point_cloud_instances.get(&entity)?;
-        Some((
-            point_cloud_instance.current_uniform_index,
-            Some(())
-        ))
-         */
     }
 
     fn get_binned_index(
@@ -369,11 +330,6 @@ impl GetFullBatchData for PointCloudPipeline {
         _entity: Entity,
     ) -> Option<NonMaxU32> {
         unreachable!();
-        /*
-        point_cloud_instances
-            .get(&entity)
-            .map(|entity| entity.current_uniform_index)
-         */
     }
 
     fn get_batch_indirect_parameters_index(
@@ -383,13 +339,6 @@ impl GetFullBatchData for PointCloudPipeline {
         _instance_index: u32,
     ) -> Option<NonMaxU32> {
         unreachable!();
-        /*get_batch_indirect_parameters_index(
-            mesh_instances,
-            meshes,
-            indirect_parameters_buffer,
-            entity,
-            instance_index,
-        )*/
     }
 }
 
@@ -429,13 +378,6 @@ pub fn prepare_point_cloud_bind_group(
         ),
     });
 }
-
-type DrawPointCloud = (
-    SetItemPipeline,
-    SetMeshViewBindGroup<0>,
-    SetPointCloudBindGroup<1>,
-    DrawPointCloudMesh,
-);
 
 pub struct SetPointCloudBindGroup<const I: usize>;
 
@@ -601,13 +543,13 @@ impl Plugin for PointCloudPlugin {
             ));
         app.sub_app_mut(RenderApp)
             .init_resource::<SpecializedRenderPipelines<PointCloudPipeline>>()
-            .add_render_command::<OrderIndependentTransparent3d, DrawPointCloud>()
+            // .add_render_command::<OrderIndependentTransparent3d, DrawPointCloud>()
             .add_systems(ExtractSchedule, (
                 extract_point_clouds,
                 extract_camera_phases,
             ))
             .add_systems(Render, (
-                queue_point_clouds.in_set(RenderSet::QueueMeshes),
+                // queue_point_clouds.in_set(RenderSet::QueueMeshes),
                 upload_point_clouds.in_set(RenderSet::PrepareResources),
                 prepare_transparent_accumulation_texture.in_set(RenderSet::PrepareResources),
                 write_batched_instance_buffer::<PointCloudPipeline>

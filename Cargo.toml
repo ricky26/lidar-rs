@@ -10,3 +10,9 @@ offset-allocator = "0.1.0"
 rand = "0.8.5"
 bevy = { path = "../bevy" }
 #bevy_xpbd_3d = "0.4.2"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

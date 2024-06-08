@@ -1,24 +1,30 @@
 #import bevy_pbr::{
     view_transformations::position_world_to_clip,
+    mesh_view_bindings::view,
 }
+#import bevy_render::color_operations::hsv_to_rgb
 #import "shaders/point_cloud.wgsl"::{
-    Vertex, VertexOutput, FragmentOutput,
-    point_cloud_vertex, calculate_fragment_output,
+    VertexOutput, FragmentOutput,
+    calculate_fragment_output,
 }
 
-@vertex
-fn vertex(in: Vertex) -> VertexOutput {
-    let v = point_cloud_vertex(in.index, in.instance_index);
-    var out: VertexOutput;
-    out.world_position = vec4(v.world_position, 0);
-    out.world_normal = v.world_normal;
-    out.clip_position = position_world_to_clip(v.world_position);
-    return out;
+struct DistanceMaterial {
+    distance_min: f32,
+    distance_max: f32,
+    hue_min: f32,
+    hue_max: f32,
 }
+
+@group(2) @binding(0) var<uniform> material: DistanceMaterial;
+@group(2) @binding(1) var base_color_texture: texture_2d<f32>;
+@group(2) @binding(2) var base_color_sampler: sampler;
 
 @fragment
 fn fragment(in: VertexOutput) -> FragmentOutput {
-    let colour = vec4(1.0, 0.0, 1.0, 0.3);
-    // TODO: populate colour!
-    return calculate_fragment_output(in.clip_position.z, colour);
+    let dist = length(in.world_position.xyz - view.world_position);
+    let frac = smoothstep(material.distance_min, material.distance_max, dist);
+    let hue = mix(material.hue_min, material.hue_max, frac);
+    let distance_color = vec4(hsv_to_rgb(vec3(hue, 1.0, 1.0)), 1.0);
+    let color = distance_color * textureSample(base_color_texture, base_color_sampler, in.uv);
+    return calculate_fragment_output(in.clip_position.z, color);
 }

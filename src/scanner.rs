@@ -1,7 +1,7 @@
 use std::f32::consts::PI;
 use std::sync::Arc;
-use bevy::color::palettes::css::{LIME, SKY_BLUE};
 
+use bevy::color::palettes::css::{LIME, SKY_BLUE};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::math::{vec2, vec3};
 use bevy::prelude::*;
@@ -12,10 +12,10 @@ use crate::point_cloud::PointCloud;
 #[derive(Component, Reflect)]
 #[reflect(Component)]
 pub struct Scanner {
-    pub angle: f32,
-    pub angle_limits: Vec2,
+    pub size_setting: f32,
+    pub angle_range: Vec2,
+    pub interval_range: Vec2,
     pub progress: f32,
-    pub interval: f32,
     pub burst_duration: f32,
     pub active: bool,
     pub trigger_burst: bool,
@@ -25,10 +25,10 @@ pub struct Scanner {
 impl Default for Scanner {
     fn default() -> Self {
         Scanner {
-            angle: PI * 0.1,
-            angle_limits: vec2(PI * 0.01, PI * 0.1),
+            size_setting: 0.75,
+            angle_range: vec2(PI * 0.01, PI * 0.1),
+            interval_range: vec2(0.005, 0.003),
             progress: 0.0,
-            interval: 0.05,
             burst_duration: 3.0,
             active: false,
             trigger_burst: false,
@@ -44,8 +44,8 @@ pub fn update_scan_input(
 ) {
     let scroll = scroll_events.read()
         .fold(0.0, |acc, event| acc + event.y * match event.unit {
-            MouseScrollUnit::Line => 14.0,
-            MouseScrollUnit::Pixel => 1.0,
+            MouseScrollUnit::Line => 0.1,
+            MouseScrollUnit::Pixel => 0.005,
         });
 
     for mut scanner in &mut scanners {
@@ -59,10 +59,10 @@ pub fn update_scan_input(
             scanner.trigger_burst = burst;
         }
 
-        let angle = scanner.angle + scroll * 0.0005;
-        let angle = angle.clamp(scanner.angle_limits.x, scanner.angle_limits.y);
-        if angle != scanner.angle {
-            scanner.angle = angle;
+        let size_setting = scanner.size_setting + scroll;
+        let size_setting = size_setting.clamp(0., 1.);
+        if size_setting != scanner.size_setting {
+            scanner.size_setting = size_setting;
         }
     }
 }
@@ -74,16 +74,13 @@ pub fn scan(
     mut point_clouds: Query<&mut PointCloud>,
 ) {
     for (mut scanner, transform) in &mut scanners {
-        scanner.progress += time.delta_seconds() / scanner.interval;
+        scanner.progress += time.delta_seconds();
         if scanner.progress < 0. {
             continue;
         }
 
-        gizmos.line(
-            transform.translation(),
-            transform.translation() + transform.forward().as_vec3(),
-            LIME,
-        );
+        // HACK: later gizmos are not drawn without this.
+        gizmos.line(transform.translation(), transform.translation(), LIME);
 
         let mut rng = rand::thread_rng();
         let Ok(mut point_cloud) = point_clouds.get_mut(scanner.point_cloud) else {
@@ -97,25 +94,35 @@ pub fn scan(
         }
 
         if scanner.active {
-            while scanner.progress > scanner.interval {
+            let interval = scanner.interval_range.x.lerp(scanner.interval_range.y, scanner.size_setting);
+            let angle = scanner.angle_range.x.lerp(scanner.angle_range.y, scanner.size_setting);
+
+            while scanner.progress > interval {
                 let p = rng.gen_range(0.0..(2.0 * PI));
-                let r = rng.gen_range(0.0..scanner.angle);
+                let r = rng.gen_range(0.0..angle);
                 let (sp, cp) = p.sin_cos();
                 let (sr, cr) = r.sin_cos();
-                let local_dir = vec3(sr * cp, sr * sp, cr);
+                let local_dir = vec3(sr * cp, sr * sp, -cr);
                 let global_dir = transform.affine()
                     .transform_vector3(local_dir)
                     .normalize();
 
+                let max_dist = 200.;
                 let start = transform.translation();
-                if start.y * global_dir.y >= 0. {
-                    let t = -start.y / global_dir.y;
-                    let end = start + t * global_dir;
-                    points.push(end.extend(0.3));
-                    gizmos.line(start, end, SKY_BLUE);
+                let (end, hit) = if start.y * global_dir.y < 0. {
+                    let t = start.y / global_dir.y;
+                    (start - t * global_dir, t >= -max_dist)
+                } else {
+                    (start + global_dir * max_dist, false)
+                };
+
+                if hit {
+                    points.push(end.extend(0.1));
                 }
 
-                scanner.progress -= scanner.interval;
+                gizmos.line(Vec3::ZERO, Vec3::Y, SKY_BLUE);
+                gizmos.line(start, end, SKY_BLUE);
+                scanner.progress -= interval;
             }
             continue;
         }
