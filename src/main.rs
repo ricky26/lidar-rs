@@ -1,9 +1,14 @@
+use std::fmt::Write;
+use std::sync::Arc;
+
 use bevy::input::common_conditions::input_just_pressed;
 use bevy::input::mouse::MouseMotion;
-use bevy::math::vec3;
+use bevy::math::{vec2, vec3};
 use bevy::prelude::*;
+use bevy::render::render_resource::encase::private::RuntimeSizedArray;
 use bevy::window::CursorGrabMode;
 
+use crate::physics::{PhysicsPlugin, PhysicsScene};
 use crate::point_cloud::{PointCloud, PointCloudMaterialPlugin, PointCloudPlugin};
 use crate::point_cloud::distance_material::PointCloudDistanceMaterial;
 use crate::scanner::{Scanner, ScannerPlugin};
@@ -12,6 +17,7 @@ use crate::transparency::OrderIndependentTransparencyPlugin;
 pub mod transparency;
 pub mod point_cloud;
 pub mod scanner;
+pub mod physics;
 
 fn main() {
     App::new()
@@ -20,6 +26,7 @@ fn main() {
             OrderIndependentTransparencyPlugin,
             PointCloudPlugin,
             PointCloudMaterialPlugin::<PointCloudDistanceMaterial>::default(),
+            PhysicsPlugin,
             ScannerPlugin,
         ))
         .add_systems(Startup, startup)
@@ -27,6 +34,9 @@ fn main() {
             grab_cursor,
             move_free_cam,
             toggle_lights.run_if(input_just_pressed(KeyCode::KeyL)),
+            clear_scan.run_if(input_just_pressed(KeyCode::KeyR)),
+            toggle_boost.run_if(input_just_pressed(KeyCode::KeyB)),
+            update_debug_text,
         ))
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(AmbientLight::NONE)
@@ -34,10 +44,9 @@ fn main() {
 }
 
 fn startup(
+    asset_server: Res<AssetServer>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut distance_materials: ResMut<Assets<PointCloudDistanceMaterial>>
+    mut distance_materials: ResMut<Assets<PointCloudDistanceMaterial>>,
 ) {
     let distance_material = distance_materials.add(PointCloudDistanceMaterial::default());
     let point_cloud = commands
@@ -46,6 +55,7 @@ fn startup(
             SpatialBundle::INHERITED_IDENTITY,
             PointCloud::default(),
             distance_material,
+            ClearPointCloud,
         ))
         .id();
 
@@ -81,32 +91,34 @@ fn startup(
             transform: Transform::from_translation(Vec3::ONE),
             ..default()
         },
-        ToggleLight,
     ));
 
     commands.spawn((
-        Name::new("GroundPlane"),
-        PbrBundle {
-            mesh: meshes.add(Plane3d::default().mesh().size(20., 20.)),
-            material: materials.add(Color::srgb(0.3, 0.5, 0.3)),
+        Name::new("Scene"),
+        SceneBundle {
+            scene: asset_server.load("models/scene.glb#Scene0"),
             ..default()
         },
+        PhysicsScene,
     ));
 
-    // commands.spawn((
-    //     Name::new("TestCloud"),
-    //     SpatialBundle::INHERITED_IDENTITY,
-    //     PointCloud {
-    //         points: Arc::new(vec![
-    //             vec4(0.0, 0.0, 0.0, 1.0),
-    //             vec4(0.0, 1.0, 0.0, 1.0),
-    //             vec4(1.0, 0.0, 0.0, 1.0),
-    //             vec4(0.0, 0.0, 1.0, 1.0),
-    //             vec4(0.0, 0.0, 1.0, 1.0),
-    //             vec4(0.0, 1.5, 0.0, 1.0),
-    //         ]),
-    //     },
-    // ));
+    commands.spawn((
+        Name::new("DebugText"),
+        TextBundle {
+            text: Text {
+                sections: vec![TextSection::new("", TextStyle::default())],
+                ..default()
+            },
+            style: Style {
+                position_type: PositionType::Absolute,
+                bottom: Val::ZERO,
+                left: Val::ZERO,
+                ..default()
+            },
+            ..default()
+        },
+        DebugText,
+    ));
 }
 
 pub enum FreeCamBinding {
@@ -191,12 +203,11 @@ pub fn move_free_cam(
     }
 }
 
-#[derive(Component, Reflect)]
-#[reflect(Component)]
-struct ToggleLight;
-
 fn toggle_lights(
-    mut lights: Query<&mut Visibility, With<ToggleLight>>,
+    mut lights: Query<
+        &mut Visibility,
+        Or<(With<PointLight>, With<SpotLight>, With<DirectionalLight>)>,
+    >,
 ) {
     for mut visibility in &mut lights {
         let new_visibility = match *visibility {
@@ -204,5 +215,51 @@ fn toggle_lights(
             Visibility::Hidden => Visibility::Inherited,
         };
         *visibility = new_visibility;
+    }
+}
+
+#[derive(Component, Reflect)]
+#[reflect(Component)]
+struct ClearPointCloud;
+
+fn clear_scan(
+    mut point_clouds: Query<&mut PointCloud, With<ClearPointCloud>>,
+) {
+    for mut point_cloud in &mut point_clouds {
+        let points = Arc::make_mut(&mut point_cloud.points);
+        points.clear();
+    }
+}
+
+fn toggle_boost(
+    mut scanners: Query<&mut Scanner>,
+) {
+    let default = Scanner::default();
+    for mut scanner in &mut scanners {
+        if scanner.interval_range[0] == default.interval_range[0] {
+            scanner.interval_range = vec2(0.00001, 0.00001);
+        } else {
+            scanner.interval_range = default.interval_range;
+        }
+    }
+}
+
+#[derive(Component, Reflect)]
+#[reflect(Component)]
+struct DebugText;
+
+fn update_debug_text(
+    mut text_query: Query<&mut Text, With<DebugText>>,
+    point_cloud_query: Query<&PointCloud, With<ClearPointCloud>>,
+) {
+    let Ok(mut text) = text_query.get_single_mut() else {
+        return;
+    };
+
+    let section = &mut text.sections[0];
+    section.value.clear();
+
+    if let Ok(point_cloud) = point_cloud_query.get_single() {
+        write!(&mut section.value, "Points: {}", point_cloud.points.len()).unwrap();
     }
 }

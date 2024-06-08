@@ -9,6 +9,7 @@ nonmax = "0.5.5"
 offset-allocator = "0.1.0"
 rand = "0.8.5"
 bevy = { path = "../bevy" }
+parry3d = "0.15.1"
 #bevy_xpbd_3d = "0.4.2"
 
 [profile.dev]
