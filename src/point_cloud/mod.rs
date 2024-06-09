@@ -543,13 +543,11 @@ impl Plugin for PointCloudPlugin {
             ));
         app.sub_app_mut(RenderApp)
             .init_resource::<SpecializedRenderPipelines<PointCloudPipeline>>()
-            // .add_render_command::<OrderIndependentTransparent3d, DrawPointCloud>()
             .add_systems(ExtractSchedule, (
                 extract_point_clouds,
                 extract_camera_phases,
             ))
             .add_systems(Render, (
-                // queue_point_clouds.in_set(RenderSet::QueueMeshes),
                 upload_point_clouds.in_set(RenderSet::PrepareResources),
                 prepare_transparent_accumulation_texture.in_set(RenderSet::PrepareResources),
                 write_batched_instance_buffer::<PointCloudPipeline>
