@@ -290,7 +290,7 @@ fn remove_emissive(
     materials: Res<Assets<StandardMaterial>>,
     query: Query<(Entity, &Handle<StandardMaterial>), Changed<Handle<StandardMaterial>>>,
 ) {
-    for (entity, handle, name) in &query {
+    for (entity, handle) in &query {
         let Some(material) = materials.get(handle) else {
             continue;
         };
@@ -299,12 +299,6 @@ fn remove_emissive(
             .max(material.emissive.green)
             .max(material.emissive.blue);
         if material.emissive_texture.is_some() || max_c * material.emissive.alpha > 0.0 {
-            if let Some(name) = name {
-                info!("Removing {name} ({entity:?})");
-            } else {
-                info!("Removing {entity:?}");
-            }
-
             commands.entity(entity).remove::<Handle<StandardMaterial>>();
         }
     }
